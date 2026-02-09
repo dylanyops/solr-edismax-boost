@@ -1,0 +1,21 @@
+data:
+  bm25_input: "data/bm25_features.csv"
+  clicks_json: "data/person_search_clicks.json"
+
+features:
+  output_wide: "artifacts/bm25_features_wide.csv"
+  bm25_fields:
+    - bm25_first_name
+    - bm25_middle_name
+    - bm25_last_name
+    - bm25_institution
+    - bm25_city
+    - bm25_state
+    - bm25_topics
+
+feature_engineering:
+  output_pairwise: "artifacts/bm25_pairwise_deltas_normalized.csv"
+
+ridge:
+  alpha: 1.0
+  output_weights: "artifacts/bm25_field_weights.csv"
