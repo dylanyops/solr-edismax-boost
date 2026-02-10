@@ -1,5 +1,5 @@
 data:
-  bm25_input: "data/bm25_features.csv"
+  bm25_input: "data/person_search_debugQueries.json"
   clicks_json: "data/person_search_clicks.json"
 
 features:
