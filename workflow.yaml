@@ -5,10 +5,8 @@ metadata:
   namespace: argo
 spec:
   entrypoint: ranking-dag
-
   imagePullSecrets:
     - name: github-creds
-  
   volumes:
   - name: pipeline-storage
     persistentVolumeClaim:
@@ -18,43 +16,52 @@ spec:
   - name: ranking-dag
     dag:
       tasks:
-        - name: generate-wide
+        # STEP 1: Bootstrap and Registry Apply
+        - name: feast-apply
           template: run-python-step
           arguments:
             parameters:
               - name: script
                 value: |
-                  from src import generate_features_wide as gen;
-                  # Match these to your config.yaml & actual image structure
-                  gen.run(debugqueries_json='/app/data/person_search_debugQueries.json', 
-                          clicks_json='/app/data/person_search_clicks.json', 
-                          output_file='/mnt/data/bm25_features_wide.csv')
+                  import os
+                  from src import generate_features_wide as gen
+                  repo_path = os.getenv("FEAST_REPO_PATH")
+                  gen.bootstrap_feast_repo(repo_path)
+                  os.chdir(repo_path)
+                  if os.system("feast apply") != 0:
+                      raise RuntimeError("Feast apply failed")
 
-        - name: feature-engineering
-          dependencies: [generate-wide]
-          template: run-python-step
-          arguments:
-            parameters:
-              - name: script
-                value: |
-                  from src import feature_engineering as feat;
-                  feat.run(features_file='/mnt/data/bm25_features_wide.csv', 
-                           clicks_file='/app/data/person_search_clicks.json', 
-                           bm25_fields=['bm25_first_name', 'bm25_last_name', 'bm25_institution'], 
-                           output_file='/mnt/data/bm25_pairwise_deltas_normalized.csv')
+        # STEP 2: Ingest local data (NOW USES A TEMPLATE)
+        - name: ingest-to-feast
+          dependencies: [feast-apply]
+          template: ingest-template
 
+        # STEP 3: Train the model using features from Feast
         - name: ridge-training
-          dependencies: [feature-engineering]
+          dependencies: [ingest-to-feast]
           template: run-python-step
           arguments:
             parameters:
               - name: script
                 value: |
-                  from src import ridge_normalize as ridge;
-                  ridge.run(input_file='/mnt/data/bm25_pairwise_deltas_normalized.csv', 
-                            alpha=1.0, 
-                            output_file='/mnt/data/bm25_field_weights.csv')
+                  from src import ridge_normalize as ridge
+                  import yaml, os
+                  
+                  # Load paths from the container's config
+                  with open('/app/configs/config.yaml') as f: 
+                      config = yaml.safe_load(f)
+                  
+                  # Use the exact key from your config: config['data']['clicks_json']
+                  # which resolves to '/app/data/person_search_clicks.json'
+                  ridge.run(
+                      repo_path=os.getenv("FEAST_REPO_PATH"),
+                      clicks_json=config['data']['clicks_json'],
+                      bm25_fields=config['features']['bm25_fields'],
+                      alpha=config['ridge']['alpha'],
+                      output_file='/mnt/data/bm25_field_weights.csv'
+                  )
 
+  # Template for simple python strings
   - name: run-python-step
     inputs:
       parameters:
@@ -65,8 +72,24 @@ spec:
       command: ["python", "-c"]
       args: ["{{inputs.parameters.script}}"]
       env:
-        - name: MLFLOW_TRACKING_URI
-          value: "http://host.docker.internal:5000"
+        - name: FEAST_REPO_PATH
+          value: "/mnt/data/feature_repo"
+      volumeMounts:
+        - name: pipeline-storage
+          mountPath: /mnt/data
+
+  # NEW: Dedicated template for ingestion to avoid YAML mapping errors
+  - name: ingest-template
+    container:
+      image: ghcr.io/dylanyops/solr-edismax-boost:latest
+      command: ["python3", "-c"]
+      args: 
+        - |
+          from src.generate_features_wide import run
+          run(
+            repo_path='/mnt/data/feature_repo', 
+            feature_source_path='/mnt/data/features.json'
+          )
       volumeMounts:
         - name: pipeline-storage
           mountPath: /mnt/data

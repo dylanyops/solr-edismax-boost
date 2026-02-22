@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-LABEL org.opencontainers.image.source=${IMAGE_SOURCE}
+LABEL org.opencontainers.image.source=https://github.com/dylanyops/solr-edismax-boost
 
 WORKDIR /app
 
