@@ -5,91 +5,119 @@ metadata:
   namespace: argo
 spec:
   entrypoint: ranking-dag
-  imagePullSecrets:
-    - name: github-creds
   volumes:
-  - name: pipeline-storage
-    persistentVolumeClaim:
-      claimName: argo-pvc
+    - name: pipeline-storage
+      persistentVolumeClaim:
+        claimName: argo-pvc
 
   templates:
-  - name: ranking-dag
-    dag:
-      tasks:
-        # STEP 1: Bootstrap and Registry Apply
-        - name: feast-apply
-          template: run-python-step
-          arguments:
-            parameters:
-              - name: script
-                value: |
-                  import os
-                  from src import generate_features_wide as gen
-                  repo_path = os.getenv("FEAST_REPO_PATH")
-                  gen.bootstrap_feast_repo(repo_path)
-                  os.chdir(repo_path)
-                  if os.system("feast apply") != 0:
-                      raise RuntimeError("Feast apply failed")
+    - name: ranking-dag
+      dag:
+        tasks:
+          # STEP 1: Feast apply
+          - name: feast-apply
+            template: run-python-step
+            arguments:
+              parameters:
+                - name: script
+                  value: |
+                    import os
+                    import subprocess
 
-        # STEP 2: Ingest local data (NOW USES A TEMPLATE)
-        - name: ingest-to-feast
-          dependencies: [feast-apply]
-          template: ingest-template
+                    repo_path = os.getenv("FEAST_REPO_PATH", "/mnt/data/feature_repo")
+                    os.makedirs(repo_path, exist_ok=True)  # ensures the directory exists in the PVC
+                    os.chdir(repo_path)  # Feast will find feature_store.yaml here
 
-        # STEP 3: Train the model using features from Feast
-        - name: ridge-training
-          dependencies: [ingest-to-feast]
-          template: run-python-step
-          arguments:
-            parameters:
-              - name: script
-                value: |
-                  from src import ridge_normalize as ridge
-                  import yaml, os
-                  
-                  # Load paths from the container's config
-                  with open('/app/configs/config.yaml') as f: 
-                      config = yaml.safe_load(f)
-                  
-                  # Use the exact key from your config: config['data']['clicks_json']
-                  # which resolves to '/app/data/person_search_clicks.json'
-                  ridge.run(
-                      repo_path=os.getenv("FEAST_REPO_PATH"),
-                      clicks_json=config['data']['clicks_json'],
-                      bm25_fields=config['features']['bm25_fields'],
-                      alpha=config['ridge']['alpha'],
-                      output_file='/mnt/data/bm25_field_weights.csv'
-                  )
+                    # Run Feast apply
+                    result = subprocess.run(["feast", "apply"], capture_output=True, text=True)
+                    if result.returncode != 0:
+                        print(result.stdout)
+                        print(result.stderr)
+                        raise RuntimeError(f"Feast apply failed with exit code {result.returncode}")
+                    else:
+                        print("✅ Feast apply completed successfully")
 
-  # Template for simple python strings
-  - name: run-python-step
-    inputs:
-      parameters:
-        - name: script
-    container:
-      image: ghcr.io/dylanyops/solr-edismax-boost:latest
-      imagePullPolicy: Always
-      command: ["python", "-c"]
-      args: ["{{inputs.parameters.script}}"]
-      env:
-        - name: FEAST_REPO_PATH
-          value: "/mnt/data/feature_repo"
-      volumeMounts:
-        - name: pipeline-storage
-          mountPath: /mnt/data
+          # STEP 2: Ingest features into Feast
+          - name: ingest-to-feast
+            dependencies: [feast-apply]
+            template: ingest-template
 
-  # NEW: Dedicated template for ingestion to avoid YAML mapping errors
-  - name: ingest-template
-    container:
-      image: ghcr.io/dylanyops/solr-edismax-boost:latest
-      command: ["python3", "-c"]
-      args: 
-        - |
-          from src.generate_features_wide import run
-          run(
-            repo_path='/mnt/data/feature_repo', 
-            feature_source_path='/mnt/data/features.json'
-          )
-      volumeMounts:
-        - name: pipeline-storage
-          mountPath: /mnt/data
+          # STEP 3: Train the model
+          - name: ridge-training
+            dependencies: [ingest-to-feast]
+            template: run-python-step
+            arguments:
+              parameters:
+                - name: script
+                  value: |
+                    import numpy as np
+                    from src import ridge_normalize as ridge
+                    import yaml, os
+
+                    with open('/app/configs/config.yaml') as f: 
+                        config = yaml.safe_load(f)
+
+                    # FEAST_REPO_PATH must remain exactly as feast-apply
+                    repo_path = os.getenv("FEAST_REPO_PATH", "/mnt/data/feature_repo")
+
+                    # Output CSV can go inside the PVC mount to persist
+                    output_file = os.path.join("/mnt/pipeline-storage", "bm25_field_weights.csv")
+
+                    ridge.run(
+                        repo_path=repo_path,
+                        clicks_json=config['data']['clicks_json'],
+                        bm25_fields=config['features']['bm25_fields'],
+                        alpha=config['ridge']['alpha'],
+                        output_file=output_file
+                    )
+
+    - name: run-python-step
+      inputs:
+        parameters:
+          - name: script
+      container:
+        image: bm25-pipeline:local
+        imagePullPolicy: Never
+        command: ["python", "-c"]
+        args: ["{{inputs.parameters.script}}"]
+        env:
+          - name: FEAST_REPO_PATH
+            value: "/mnt/data/feature_repo"
+        volumeMounts:
+          - name: pipeline-storage
+            mountPath: /mnt/pipeline-storage
+
+    - name: ingest-template
+      container:
+        image: bm25-pipeline:local
+        imagePullPolicy: Never
+        command: ["python", "-c"]
+        args:
+          - |
+            from src.generate_features_wide import parse_and_compute
+            import pandas as pd
+            import os
+            from pathlib import Path
+
+            # PVC-mounted base directory
+            BASE_DIR = Path(os.getenv("APP_BASE_DIR", "/mnt/data"))
+
+            # Directory to store Feast data
+            FEAST_DATA_DIR = BASE_DIR / "feature_repo" / "data"
+            FEAST_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+            all_features = []
+            for file_path in [BASE_DIR / "data" / "person_search_debugQueries.json"]:
+                all_features.extend(parse_and_compute(file_path))
+
+            df = pd.DataFrame(all_features)
+            df["event_timestamp"] = pd.Timestamp.now(tz="UTC")
+
+            # Save JSON (optional)
+            df.to_json(BASE_DIR / "features.json", orient="records", indent=2)
+
+            # Save Parquet for Feast in PVC
+            parquet_file = FEAST_DATA_DIR / "documents.parquet"
+            df.to_parquet(parquet_file, index=False)
+
+            print(f"✅ Features saved for Feast: {parquet_file}")
