@@ -1,109 +1,95 @@
-import os
-from pathlib import Path
 import logging
-import json
-
-import numpy as np
+from pathlib import Path
 import pandas as pd
-from feast import FeatureStore
+import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
+import yaml
 import mlflow
 
-# ---------------- Logging Configuration ----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+# ---------------- Logging ----------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ---------------- Ridge Step ----------------
-def run(repo_path=None, clicks_json=None, output_file=None, **kwargs):
-    """
-    Train Ridge regression weights for BM25 features using Feast historical features.
+# ---------------- Load config ----------------
+CONFIG_FILE = Path("configs/config.yaml")
+if not CONFIG_FILE.exists():
+    raise FileNotFoundError(f"Config not found: {CONFIG_FILE}")
 
-    Args:
-        repo_path (str or Path): Feast repo path (defaults to DATA_DIR/feature_repo)
-        clicks_json (str or Path): Clicks JSON file (defaults to DATA_DIR/clicks.json)
-        output_file (str or Path): CSV file to save Ridge weights (defaults to DATA_DIR/weights.csv)
-    """
-    try:
-        # ---------------- Paths ----------------
-        DATA_DIR = Path("/mnt/data")
+with CONFIG_FILE.open() as f:
+    config = yaml.safe_load(f)
 
-        repo_path = Path(repo_path or DATA_DIR / "feature_repo")
-        clicks_json = Path(clicks_json or DATA_DIR / "person_search_clicks.json")
-        output_file = Path(output_file or DATA_DIR / "bm25_field_weights.csv")
+BM25_FIELDS = config["features"]["bm25_fields"]
 
-        bm25_fields = ["bm25_city", "bm25_first_name", "bm25_institution",
-                       "bm25_last_name", "bm25_topics"]
+OUTPUT_FILE = Path(__file__).parent / config["ridge"]["output_weights"]
+PARQUET_FILE = (Path(__file__).parent / "artifacts" / "bm25_features_wide.parquet").resolve()
 
-        # ---------------- Load Clicks ----------------
-        if not clicks_json.exists():
-            raise FileNotFoundError(f"Clicks JSON not found: {clicks_json}")
-        with clicks_json.open("r") as f:
-            clicks_df = pd.DataFrame(json.load(f))
+logger.info(f"Looking for Parquet file at: {PARQUET_FILE}")
 
-        if clicks_df.empty:
-            raise ValueError("Clicks DataFrame is empty.")
+# ---------------- Main ----------------
+def main():
+    if not PARQUET_FILE.exists():
+        raise FileNotFoundError(f"Feature Parquet not found: {PARQUET_FILE}")
 
-        # ---------------- Fetch Features from Feast ----------------
-        store = FeatureStore(repo_path=str(repo_path))
+    # ---------------- Load data ----------------
+    df = pd.read_parquet(PARQUET_FILE)
+    logger.info(f"Loaded {len(df)} rows from {PARQUET_FILE}")
 
-        entities = pd.DataFrame({
-            "doc_id": clicks_df["clicked_person_id"].unique().astype(str),
-            "event_timestamp": [pd.Timestamp("2100-01-01", tz="UTC")] *
-                               clicks_df["clicked_person_id"].nunique()
-        })
+    X = df[BM25_FIELDS].fillna(0).values
 
-        feature_res = store.get_historical_features(
-            entity_df=entities,
-            features=[f"doc_bm25_features:{f}" for f in bm25_fields]
-        ).to_df()
+    # Placeholder clicks — replace with real signals
+    y = np.random.rand(len(X))
 
-        if feature_res.empty:
-            raise ValueError("Feast returned empty features.")
+    # ---------------- Feature scaling ----------------
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-        # ---------------- Data Wrangling ----------------
-        X = feature_res[bm25_fields].fillna(0).values
+    # ---------------- Train Ridge ----------------
+    model = Ridge(alpha=config["ridge"]["alpha"])
+    model.fit(X_scaled, y)
 
-        if "clicked" in feature_res:
-            y = feature_res["clicked"].values
-        else:
-            logger.warning("'clicked' column missing. Using random placeholder targets.")
-            y = np.random.rand(len(X))
+    raw_coefs = model.coef_
 
-        # ---------------- Scale Features ----------------
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
+    # ---------------- Convert to ranking weights ----------------
+    # Step 1: remove negative coefficients
+    positive_coefs = np.maximum(raw_coefs, 0)
 
-        # ---------------- Train Ridge ----------------
-        model = Ridge(alpha=1.0)
-        model.fit(X_scaled, y)
+    # Step 2: normalize to sum = 1
+    if positive_coefs.sum() > 0:
+        normalized_weights = positive_coefs / positive_coefs.sum()
+    else:
+        logger.warning("All coefficients were negative — falling back to uniform weights")
+        normalized_weights = np.ones_like(positive_coefs) / len(positive_coefs)
 
-        # ---------------- Save Weights ----------------
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        weights_df = pd.DataFrame({
-            "field": bm25_fields,
-            "weight": model.coef_
-        })
-        weights_df.to_csv(output_file, index=False)
-        logger.info(f"✅ Ridge weights saved to {output_file}")
+    # ---------------- Save weights ----------------
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-        # ---------------- MLflow Logging ----------------
-        mlflow.set_experiment("ridge_feature_weights")
-        with mlflow.start_run():
-            mlflow.log_param("num_documents", len(feature_res))
-            mlflow.log_param("bm25_fields", ",".join(bm25_fields))
-            mlflow.log_metric("avg_total_score", feature_res.get("total_doc_score", pd.Series([0])).mean())
-            mlflow.log_artifact(str(output_file))
+    weights_df = pd.DataFrame({
+        "field": BM25_FIELDS,
+        "ridge_coef_raw": raw_coefs,
+        "ridge_coef_positive": positive_coefs,
+        "normalized_weight": normalized_weights
+    })
 
-        logger.info("Ridge step completed successfully.")
+    weights_df.to_csv(OUTPUT_FILE, index=False)
 
-    except Exception as e:
-        logger.exception(f"Ridge step failed: {e}")
-        raise
+    logger.info("✅ Ridge weights saved")
+    logger.info("\n" + weights_df.to_string(index=False))
 
-# ---------------- Main Guard ----------------
+    # ---------------- MLflow logging ----------------
+    mlflow.set_experiment("ridge_feature_weights")
+
+    with mlflow.start_run():
+        mlflow.log_param("num_documents", len(df))
+        mlflow.log_param("bm25_fields", ",".join(BM25_FIELDS))
+        mlflow.log_param("alpha", config["ridge"]["alpha"])
+
+        mlflow.log_metric("avg_total_score", df.get("total_doc_score", pd.Series([0])).mean())
+
+        mlflow.log_artifact(str(OUTPUT_FILE))
+
+        logger.info("✅ Ridge step logged to MLflow")
+
+
 if __name__ == "__main__":
-    run()
+    main()

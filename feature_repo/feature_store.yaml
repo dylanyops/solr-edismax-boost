@@ -1,16 +1,9 @@
-project: bm25_ranking
-
-# The registry tracks your Feature Views (doc_bm25_features)
-# We place it inside the repo folder on the PVC
-registry: /mnt/data/feature_repo/registry.db
-
+project: solr_bm25_features
+registry: registry.db
 provider: local
-entity_key_serialization_version: 2
-
-offline_store:
-  type: file
 
 online_store:
   type: sqlite
-  # The online store is used for materialize/online lookups
-  path: /mnt/data/feature_repo/online_store.db
+
+offline_store:
+  type: file

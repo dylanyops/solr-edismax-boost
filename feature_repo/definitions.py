@@ -38,7 +38,7 @@ doc_push_source = PushSource(
 doc_bm25_view = FeatureView(
     name="doc_bm25_features",
     entities=[document],
-    ttl=None, # Keep features indefinitely for this use case
+    ttl=None,
     schema=[
         Field(name="bm25_city", dtype=Float32),
         Field(name="bm25_first_name", dtype=Float32),

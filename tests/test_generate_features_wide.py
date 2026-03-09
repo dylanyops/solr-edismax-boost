@@ -33,7 +33,6 @@ def test_traverse_details_extracts_features():
     ]
 
     features = {f"bm25_{f}": 0.0 for f in BM25_FIELDS}
-
     traverse_details(details, features)
 
     assert features["bm25_first_name"] == 1.5
@@ -64,26 +63,22 @@ def test_parse_features(tmp_path):
     }
 
     file_path = tmp_path / "test.json"
-
     with open(file_path, "w") as f:
         json.dump(test_json, f)
 
     results = parse_features(file_path)
 
     assert len(results) == 1
-
-    row = results[0]
-
-    assert row["doc_id"] == "doc1"
-    assert row["total_doc_score"] == 5.0
-    assert row["bm25_first_name"] == 1.2
+    assert results[0]["doc_id"] == "doc1"
+    assert results[0]["total_doc_score"] == 5.0
+    assert results[0]["bm25_first_name"] == 1.2
 
 
 def test_validate_schema_pass():
     data = {
         "doc_id": ["1"],
         "total_doc_score": [1.0],
-        "event_timestamp": [pd.Timestamp.now(tz="UTC")]
+        "event_timestamp": [pd.Timestamp.utcnow()]
     }
 
     for f in BM25_FIELDS:
@@ -91,7 +86,7 @@ def test_validate_schema_pass():
 
     df = pd.DataFrame(data)
 
-    # Should NOT raise an exception
+    # Should not raise
     validate_schema(df)
 
 

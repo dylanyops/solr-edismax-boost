@@ -20,14 +20,11 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------------------
 # Base directory and data paths
 # ------------------------------------------------------------------------------
-DATA_DIR = Path("/mnt/data")
+DATA_DIR = Path("artifacts")
+DATA_DIR.mkdir(exist_ok=True)
 
-# Paths to Solr debug query logs
-SOLR_LOG_FILES = [
-    DATA_DIR / "person_search_debugQueries.json",
-]
+INPUT_FILE = Path("/Users/shared/data/person_search_debugQueries.json")
 
-# Fields for which we want BM25 contributions
 BM25_FIELDS = [
     "first_name",
     "middle_name",
@@ -49,159 +46,119 @@ REQUIRED_COLUMNS = {
 # Precompiled regex for field extraction from Solr explain description
 FIELD_REGEX = re.compile(r"weight\(([^:]+):")
 
-
 # ------------------------------------------------------------------------------
 # Helper Functions
 # ------------------------------------------------------------------------------
 def extract_field_from_description(description: str) -> str | None:
-    """
-    Extract the field name from Solr explain description.
-    Example:
-        'weight(first_name:John in doc) ...' -> 'first_name'
-    """
     match = FIELD_REGEX.search(description)
     return match.group(1) if match else None
 
-
-def parse_and_compute(file_path: Path) -> List[Dict[str, Any]]:
+def traverse_details(details: List[Dict[str, Any]], features: Dict[str, float]):
     """
-    Parse a Solr debug log file and compute BM25 features for each document.
-    
-    Args:
-        file_path (Path): Path to Solr debug JSON log.
-    
-    Returns:
-        List[Dict[str, Any]]: List of per-document feature dictionaries.
+    Recursively traverse Solr debug details to extract BM25 contributions
     """
-    results = []
+    for detail in details:
+        description = detail.get("description", "")
+        field_name = extract_field_from_description(description)
+        if field_name in BM25_FIELDS:
+            features[f"bm25_{field_name}"] = float(detail.get("value", 0.0))
+        if "details" in detail:
+            traverse_details(detail["details"], features)
 
+def parse_features(file_path: Path) -> List[Dict[str, Any]]:
     if not file_path.exists():
-        logger.error(f"File not found: {file_path}")
-        return results
+        logger.error(f"BM25 input file not found: {file_path}")
+        return []
 
-    try:
-        with file_path.open("r") as f:
-            data = json.load(f)
-    except json.JSONDecodeError:
-        logger.exception(f"Invalid JSON in file: {file_path}")
-        return results
-    except Exception:
-        logger.exception(f"Unexpected error reading file: {file_path}")
-        return results
+    with file_path.open() as f:
+        data = json.load(f)
 
-    # Determine documents
-    docs = data if isinstance(data, list) else data.get("response", {}).get("docs", [])
-    logger.info(f"Processing {len(docs)} documents from {file_path.name}")
+    # Ensure we always have a list of entries
+    if isinstance(data, dict):
+        entries = [data]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        logger.error("Unexpected JSON structure")
+        return []
 
-    for doc in docs:
-        try:
+    results = []
+    for entry in entries:
+        debug_explain = entry.get("debug", {}).get("explain", {})
+        docs = entry.get("response", {}).get("docs", [])
+
+        logger.info(f"Processing {len(docs)} documents")
+
+        for doc in docs:
             doc_id = doc.get("id")
             if not doc_id:
                 continue
 
-            # Initialize feature dictionary
-            features = {
-                "doc_id": doc_id,
-                "total_doc_score": 0.0
-            }
+            features = {"doc_id": doc_id}
 
-            # Initialize BM25 fields to 0.0
-            for field in BM25_FIELDS:
-                features[f"bm25_{field}"] = 0.0
+            explain = debug_explain.get(doc_id, {})
+            features["total_doc_score"] = float(explain.get("value", doc.get("score", 0.0)))
 
-            # Extract debug explain block for per-field BM25
-            explain = doc.get("debug", {}).get("explain", {}).get(doc_id, {})
-            features["total_doc_score"] = float(explain.get("value", 0.0))
+            # Initialize BM25 fields
+            for f in BM25_FIELDS:
+                features[f"bm25_{f}"] = 0.0
 
-            for detail in explain.get("details", []):
-                description = detail.get("description", "")
-                field_name = extract_field_from_description(description)
-                if field_name in BM25_FIELDS:
-                    features[f"bm25_{field_name}"] = float(detail.get("value", 0.0))
+            # Fill BM25 fields from explain details
+            if explain:
+                traverse_details(explain.get("details", []), features)
 
             results.append(features)
 
-        except Exception:
-            logger.exception(f"Failed processing document {doc.get('id')}")
-            continue
-
     return results
 
-
 def validate_schema(df: pd.DataFrame):
-    """
-    Basic schema validation to ensure required columns exist.
-    
-    Args:
-        df (pd.DataFrame): DataFrame to validate.
-    
-    Raises:
-        ValueError: If required columns are missing.
-    """
     missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
     logger.info("Schema validation passed.")
 
-
 # ------------------------------------------------------------------------------
 # Main Execution Function
 # ------------------------------------------------------------------------------
 def main():
-    """
-    Main entry point for the feature generation pipeline.
-    Processes Solr debug logs, extracts BM25 features, saves offline artifacts,
-    and logs metadata to MLflow.
-    """
-    logger.info("Starting Solr feature generation job")
+    logger.info(f"Starting Solr feature generation job using {INPUT_FILE}")
     mlflow.set_experiment("solr_feature_generation")
 
     with mlflow.start_run():
-
-        all_features = []
-
-        # Parse each Solr log file
-        for file_path in SOLR_LOG_FILES:
-            file_results = parse_and_compute(file_path)
-            all_features.extend(file_results)
+        all_features = parse_features(INPUT_FILE)
 
         if not all_features:
-            logger.warning("No features generated. Exiting.")
+            logger.error("No features generated. Check input JSON structure!")
             return
 
-        # Convert all features to a DataFrame (efficient bulk creation)
-        df = pd.DataFrame.from_records(all_features)
-
-        # Add timestamp required by Feast
+        df = pd.DataFrame(all_features)
         df["event_timestamp"] = pd.Timestamp.now(tz="UTC")
 
-        # Validate schema before writing
         validate_schema(df)
 
-        # ---------------- Save Artifacts ----------------
-        # Save JSON for debugging purposes
-        json_file = DATA_DIR / "features.json"
-        df.to_json(json_file, orient="records", indent=2)
-        logger.info(f"Saved JSON features to {json_file}")
+        # Save CSV and Parquet locally
+        csv_file = DATA_DIR / "bm25_features_wide.csv"
+        df.to_csv(csv_file, index=False)
+        logger.info(f"Saved CSV features to {csv_file}")
 
-        # Save Parquet for Feast offline store
-        parquet_file = DATA_DIR / "feature_repo" / "data" / "documents.parquet"
-        parquet_file.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(parquet_file, index=False)
-        logger.info(f"Saved Parquet features to {parquet_file}")
+        mlflow_parquet = Path("artifacts/bm25_features_wide.parquet")
+        mlflow_parquet.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(mlflow_parquet, index=False)
+        logger.info(f"Saved Parquet features to artifacts/bm25_features_wide.parquet")
 
-        # ---------------- MLflow Logging ----------------
-        mlflow.log_param("num_input_files", len(SOLR_LOG_FILES))
+        feast_parquet = Path("feature_repo/data/documents.parquet")
+        feast_parquet.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(feast_parquet, index=False)
+        logger.info(f"Saved Parquet features to feature_repo/data/documents.parquet")
+
+        # MLflow logging
+        mlflow.log_param("num_documents", len(df))
         mlflow.log_param("bm25_fields", ",".join(BM25_FIELDS))
-        mlflow.log_metric("num_documents_processed", len(df))
-        mlflow.log_metric("avg_total_doc_score", df["total_doc_score"].mean())
-
-        mlflow.log_artifact(str(json_file))
-        mlflow.log_artifact(str(parquet_file))
+        mlflow.log_artifact(str(csv_file))
+        mlflow.log_artifact("artifacts/bm25_features_wide.parquet")
 
         logger.info(f"✅ Total docs processed: {len(df)}")
         logger.info("Feature generation job completed successfully.")
-
 
 # ------------------------------------------------------------------------------
 # Entry Point Guard

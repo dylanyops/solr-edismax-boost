@@ -22,18 +22,28 @@ spec:
                 - name: script
                   value: |
                     import os
+                    import shutil
                     import subprocess
 
-                    repo_path = os.getenv("FEAST_REPO_PATH", "/mnt/data/feature_repo")
-                    os.makedirs(repo_path, exist_ok=True)  # ensures the directory exists in the PVC
-                    os.chdir(repo_path)  # Feast will find feature_store.yaml here
+                    # Source repo inside container
+                    SRC_REPO = "/app/feature_repo"
 
-                    # Run Feast apply
+                    # Destination in PVC
+                    DST_REPO = os.getenv("FEAST_REPO_PATH", "/mnt/data/feature_repo")
+
+                    # Copy repo if not already there
+                    if not os.path.exists(DST_REPO):
+                        shutil.copytree(SRC_REPO, DST_REPO)
+
+                    os.chdir(DST_REPO)
+
                     result = subprocess.run(["feast", "apply"], capture_output=True, text=True)
+
+                    print(result.stdout)
+
                     if result.returncode != 0:
-                        print(result.stdout)
                         print(result.stderr)
-                        raise RuntimeError(f"Feast apply failed with exit code {result.returncode}")
+                        raise RuntimeError("Feast apply failed")
                     else:
                         print("✅ Feast apply completed successfully")
 
@@ -61,7 +71,7 @@ spec:
                     repo_path = os.getenv("FEAST_REPO_PATH", "/mnt/data/feature_repo")
 
                     # Output CSV can go inside the PVC mount to persist
-                    output_file = os.path.join("/mnt/pipeline-storage", "bm25_field_weights.csv")
+                    output_file = "/mnt/data/bm25_field_weights.csv"
 
                     ridge.run(
                         repo_path=repo_path,
@@ -85,7 +95,7 @@ spec:
             value: "/mnt/data/feature_repo"
         volumeMounts:
           - name: pipeline-storage
-            mountPath: /mnt/pipeline-storage
+            mountPath: /mnt/data
 
     - name: ingest-template
       container:
