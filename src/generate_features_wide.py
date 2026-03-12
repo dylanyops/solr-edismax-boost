@@ -146,6 +146,10 @@ def load_clicks(click_file: Path) -> pd.DataFrame:
         "clicked_person_id": "doc_id"
     })
 
+    # Ensure consistent types
+    clicks_df["query_id"] = clicks_df["query_id"].astype(str)
+    clicks_df["doc_id"] = clicks_df["doc_id"].astype(str)
+
     clicks_df["clicked"] = 1
 
     return clicks_df[["query_id", "doc_id", "clicked"]]
