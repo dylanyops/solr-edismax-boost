@@ -6,6 +6,7 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 import yaml
 import mlflow
+import joblib
 
 # ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -18,6 +19,11 @@ if not CONFIG_FILE.exists():
 
 with CONFIG_FILE.open() as f:
     config = yaml.safe_load(f)
+
+MODEL_DIR = Path("/mnt/data/models")
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+model_path = MODEL_DIR / "person_ranker_candidate.pkl"
 
 BM25_FIELDS = config["features"]["bm25_fields"]
 
@@ -76,6 +82,10 @@ def main():
     logger.info("✅ Ridge weights saved")
     logger.info("\n" + weights_df.to_string(index=False))
 
+    joblib.dump(model, model_path)
+
+    logger.info(f"Model saved to {model_path}")
+
     # ---------------- MLflow logging ----------------
     mlflow.set_experiment("ridge_feature_weights")
 
@@ -87,6 +97,8 @@ def main():
         mlflow.log_metric("avg_total_score", df.get("total_doc_score", pd.Series([0])).mean())
 
         mlflow.log_artifact(str(OUTPUT_FILE))
+
+        mlflow.log_artifact(str(model_path))
 
         logger.info("✅ Ridge step logged to MLflow")
 
