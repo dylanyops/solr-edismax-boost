@@ -1,6 +1,6 @@
 data:
-  bm25_input: "/Users/shared/data/person_search_debugQueries.json"
-  clicks_json: "/Users/shared/data/person_search_clicks.json"
+  bm25_input: "/mnt/data/person_search_debugQueries.json"
+  clicks_json: "/mnt/data/person_search_clicks.json"
 
 features:
   output_wide: "artifacts/bm25_features_wide.csv"

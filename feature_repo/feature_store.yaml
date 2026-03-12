@@ -1,5 +1,8 @@
 project: solr_bm25_features
-registry: registry.db
+
+registry: /mnt/data/feature_repo/registry.db
+
+registry: /mnt/data/feature_repo/registry.db
 provider: local
 
 online_store:

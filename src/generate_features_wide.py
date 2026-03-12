@@ -220,7 +220,7 @@ def main():
         df.to_parquet(mlflow_parquet, index=False)
         logger.info(f"Saved Parquet features to {mlflow_parquet}")
 
-        feast_parquet = Path("feature_repo/data/documents.parquet")
+        feast_parquet = Path("/mnt/data/feature_repo/data/documents.parquet")
         feast_parquet.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(feast_parquet, index=False)
         logger.info(f"Saved Parquet features to {feast_parquet}")
