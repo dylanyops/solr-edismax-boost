@@ -4,3 +4,4 @@ pandas>=1.5.0
 scikit-learn>=1.2.0
 PyYAML>=6.0
 numpy<2.0.0
+evidently==0.7.0
