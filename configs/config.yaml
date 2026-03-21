@@ -1,12 +1,12 @@
 data:
-  bm25_input: "/Users/shared/data/person_search_debugQueries.json"
-  clicks_json: "/Users/shared/data/person_search_clicks.json"
-  validation_solr_logs: "/Users/shared/data/validation_solr_logs.json"
-  validation_clicks: "/Users/shared/data/validation_click_logs.json"
-  parquet_file: "/Users/shared/data/validation_dataset.parquet"
-  training_parquet_file: "/Users/shared/data/training_dataset.parquet"
-  model_file: "/Users/shared/data/models/ridge_model.joblib"
-  report_file: "/Users/shared/reports/evidently_report.html"
+  bm25_input: "/mnt/data/person_search_debugQueries.json"
+  clicks_json: "/mnt/data/person_search_clicks.json"
+  validation_solr_logs: "/mnt/data/validation_solr_logs.json"
+  validation_clicks: "/mnt/data/validation_click_logs.json"
+  parquet_file: "/mnt/data/validation_dataset.parquet"
+  training_parquet_file: "/mnt/data/training_dataset.parquet"
+  model_file: "/mnt/data/models/ridge_model.joblib"
+  report_file: "/mnt/data/evidently_report.html"
   sample_size: 1000
 
 features:
